@@ -1,0 +1,15 @@
+{
+  "name": "matthias-track",
+  "version": "24.2.0",
+  "private": true,
+  "description": "MatthiasTrack — suivi personnel de films et séries (PWA mono-fichier, TMDB + Supabase).",
+  "type": "module",
+  "scripts": {
+    "check": "node tools/check.mjs",
+    "serve": "npx --yes http-server -c-1 -p 8080 ."
+  },
+  "devDependencies": {
+    "eslint": "9.17.0",
+    "globals": "15.14.0"
+  }
+}
