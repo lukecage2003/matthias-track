@@ -14,8 +14,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="MatthiasTrack" />
 
-<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
-<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<!-- defer : ne bloque plus le premier affichage ; exécutés avant le module principal (ordre garanti). -->
+<script defer src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js" integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs" crossorigin="anonymous"></script>
+<script defer src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #090d16;
@@ -2023,7 +2024,7 @@ html.mt-modal-lock, body.mt-modal-lock { overflow:hidden !important; overscroll-
    ======================================================================== */
 :root { --mt-ease: cubic-bezier(.22,.8,.22,1); --mt-glass: rgba(17,23,36,.86); }
 #root { isolation:isolate; }
-#root > .page, #root > main, #root > .container, #root > .profile-dashboard {
+#root > .page, #root > section.page, #root > .container, #root > .profile-dashboard {
   animation: mtPageEnter .34s var(--mt-ease) both;
 }
 @keyframes mtPageEnter { from { opacity:0; transform:translate3d(0,7px,0); } to { opacity:1; transform:translate3d(0,0,0); } }
@@ -2178,7 +2179,7 @@ body.nav-hidden .bottom-nav { visibility:visible; }
   .personal-calendar-weekday { font-size:9px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #root > .page, #root > main, #root > .container, #root > .profile-dashboard { animation:none !important; }
+  #root > .page, #root > section.page, #root > .container, #root > .profile-dashboard { animation:none !important; }
   .bottom-nav,.bottom-nav .bn-item,.smart-collection-card,.smart-media-card,.smart-media-poster img { transition:none !important; }
 }
 
@@ -2270,7 +2271,7 @@ body.nav-hidden .bottom-nav:focus-within { transform:translate(-50%,0) !importan
 </head>
 <body>
 
-<div id="root"></div>
+<main id="root"></main>
 
 
 <div id="trailer-modal" class="trailer-overlay" style="display:none;" onclick="if(event.target===this) app.closeTrailer()">
@@ -2318,7 +2319,7 @@ body.nav-hidden .bottom-nav:focus-within { transform:translate(-50%,0) !importan
 </div>
 
 <script type="module">
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.118.0'; // version figée : pas de mise à jour surprise en production
 
 // ============================================================================
 // CONFIG — clés API codées en dur dans le bundle (jamais saisies par
@@ -2326,7 +2327,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 // de vérité pour ces valeurs : remplace les chaînes ci-dessous par tes
 // propres clés avant de déployer/build l'app.
 // ============================================================================
-const APP_VERSION = 'v24.1-stability-polish'; // Correctifs navigation, stabilité des interactions et animations discrètes
+const APP_VERSION = 'v24.2-hardening'; // PWA hors-ligne, retour après connexion, accessibilité, dépendances figées
 console.log('MatthiasTrack', APP_VERSION);
 
 /** Date locale YYYY-MM-DD : évite que les dates du jour basculent à hier/demain
@@ -2870,13 +2871,38 @@ async function refreshCurrentUser() {
 /** À appeler avant toute écriture en base : vérifie que la session est encore valide,
  * la rafraîchit si elle est proche de l'expiration, et échoue clairement plutôt que de
  * laisser partir une requête sans authentification valide (cause du bug RLS silencieux). */
+/** Mémorise la page courante puis ouvre l'écran de connexion : après login,
+ * l'utilisateur revient exactement là où il était (fiche film, liste…) au lieu
+ * de l'accueil. sessionStorage = limité à l'onglet, rien de persistant. */
+const AFTER_LOGIN_KEY = 'mt_after_login';
+function redirectToLogin() {
+  const here = location.hash || '#/';
+  if (!here.startsWith('#/login')) {
+    try { sessionStorage.setItem(AFTER_LOGIN_KEY, here); } catch { /* stockage indisponible : retour à l'accueil */ }
+    navigate('#/login');
+  }
+}
+function consumeAfterLoginHash() {
+  try {
+    const saved = sessionStorage.getItem(AFTER_LOGIN_KEY);
+    sessionStorage.removeItem(AFTER_LOGIN_KEY);
+    // Seules les routes internes sont acceptées (pas d'URL externe injectée).
+    if (saved && /^#\/[\w\-/%.?=&]*$/.test(saved) && !saved.startsWith('#/login')) return saved;
+  } catch { /* ignore */ }
+  return '#/';
+}
+
 async function ensureFreshSession() {
   const { data, error } = await sb.auth.getSession();
   if (error) throw new Error('Session invalide : ' + formatSbError(error));
 
   if (!data.session) {
+    const wasLoggedIn = !!currentUser;
     currentUser = null;
-    throw new Error("Ta session a expiré — reconnecte-toi (bouton Connexion).");
+    redirectToLogin();
+    throw new Error(wasLoggedIn
+      ? "Ta session a expiré — reconnecte-toi pour continuer."
+      : "Connecte-toi pour enregistrer ça dans ton suivi.");
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -2884,7 +2910,8 @@ async function ensureFreshSession() {
     const { data: refreshed, error: refreshErr } = await sb.auth.refreshSession();
     if (refreshErr || !refreshed.session) {
       currentUser = null;
-      throw new Error("Ta session a expiré — reconnecte-toi (bouton Connexion).");
+      redirectToLogin();
+      throw new Error("Ta session a expiré — reconnecte-toi pour continuer.");
     }
     currentUser = refreshed.session.user;
   } else {
@@ -4361,8 +4388,8 @@ function renderAuth() {
     <div class="container form-card">
       <h1 style="font-size:24px;">Mot de passe oublié</h1>
       <p style="color:var(--muted); font-size:14px; margin-bottom:14px;">On t'envoie un lien par email pour en choisir un nouveau.</p>
-      <div id="auth-error" class="error-text"></div>
-      <div id="auth-success" class="success-text"></div>
+      <div id="auth-error" class="error-text" role="alert" aria-live="assertive"></div>
+      <div id="auth-success" class="success-text" role="status" aria-live="polite"></div>
       <form onsubmit="return false;">
         <div class="field"><label>Email</label><input id="forgot-email" type="email" required /></div>
         <button class="btn blue" style="width:100%; justify-content:center;" onclick="app.submitForgotPassword()">Envoyer le lien</button>
@@ -4377,13 +4404,13 @@ function renderAuth() {
   root.innerHTML = chrome() + `
   <div class="container form-card">
     <h1 style="font-size:24px;">${authMode === 'login' ? 'Connexion' : 'Créer un compte'}</h1>
-    <div id="auth-error" class="error-text"></div>
-    <div id="auth-success" class="success-text"></div>
+    <div id="auth-error" class="error-text" role="alert" aria-live="assertive"></div>
+    <div id="auth-success" class="success-text" role="status" aria-live="polite"></div>
     <form id="auth-form" onsubmit="return false;">
       ${authMode === 'signup' ? `
-      <div class="field"><label>Nom d'utilisateur</label><input id="auth-username" required minlength="3" /></div>` : ''}
-      <div class="field"><label>Email</label><input id="auth-email" type="email" required /></div>
-      <div class="field"><label>Mot de passe</label><input id="auth-password" type="password" required minlength="8" /></div>
+      <div class="field"><label for="auth-username">Nom d'utilisateur</label><input id="auth-username" required minlength="3" autocomplete="username" /></div>` : ''}
+      <div class="field"><label for="auth-email">Email</label><input id="auth-email" type="email" required autocomplete="email" inputmode="email" /></div>
+      <div class="field"><label for="auth-password">Mot de passe</label><input id="auth-password" type="password" required minlength="8" autocomplete="${authMode === 'signup' ? 'new-password' : 'current-password'}" /></div>
       <button class="btn blue" style="width:100%; justify-content:center;" onclick="app.submitAuth()">
         ${authMode === 'login' ? 'Se connecter' : 'Créer mon compte'}
       </button>
@@ -4429,7 +4456,7 @@ let lastHomeData = null; // dernières données chargées, pour changer de filtr
 
 function topPillsHtml() {
   const opt = (key, label) => `<button class="top-pill ${homeFilter === key ? 'active' : ''}" onclick="app.setHomeFilter('${key}')">${label}</button>`;
-  return `<div class="top-pills">${opt('all', 'Tout')}${opt('tv', 'Séries')}${opt('movie', 'Films')}</div>`;
+  return `<div class="top-pills" role="group" aria-label="Filtrer l’accueil">${opt('all', 'Tout')}${opt('tv', 'Séries')}${opt('movie', 'Films')}</div>`;
 }
 
 function skeletonRowHtml(count = 6) {
@@ -4590,7 +4617,7 @@ async function renderHome() {
     if (!cached) {
       const stale = localCache.getStale(cacheKey);
       if (stale) { lastHomeData = stale; renderHomeContent(stale); }
-      else root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+      else root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
     } else {
       showErrorToast("Impossible de rafraîchir l'accueil : " + err.message);
     }
@@ -5158,10 +5185,10 @@ async function renderMediaDetail(type, tmdbId) {
             <button class="btn ghost" onclick="app.detailRewatch('${media.id}')">↻ Revu</button>
             <span id="views-count" style="font-size:13px; color:var(--muted);">Vu ${totalViews} fois</span>
             <button class="btn ghost" onclick="app.openStory()">📸 Créer ma Story</button>` : ''}
-            <button class="btn ghost" style="color:var(--red);" onclick="app.banClick('${media.id}')" title="Bannir définitivement">🚫 Bannir</button>
+            <button class="btn ghost" style="color:#fecaca; background:rgba(127,29,29,.6); border-color:rgba(248,113,113,.45);" onclick="app.banClick('${media.id}')" title="Bannir définitivement">🚫 Bannir</button>
           </div>
 
-          <div class="stars" id="stars-row" aria-label="Ta note sur cinq étoiles">
+          <div class="stars" id="stars-row" role="group" aria-label="Ta note sur cinq étoiles">
             ${starRatingInputHtml(rating, `app.detailRate.bind(null, '${media.id}')`)}
           </div>
           <div id="stars-row-label" style="font-size:12px; color:var(--muted); margin-top:4px; ${rating != null ? '' : 'display:none;'}">${rating ?? ''}/5</div>
@@ -5242,7 +5269,7 @@ async function renderMediaDetail(type, tmdbId) {
           </div>` : ''}
 
           <div style="margin-top:24px;">
-            <label style="display:block; font-size:13px; color:#cbd5e1; margin-bottom:6px;">📅 Journal rétroactif — corriger la date de visionnage</label>
+            <label for="retro-date" style="display:block; font-size:13px; color:#cbd5e1; margin-bottom:6px;">📅 Journal rétroactif — corriger la date de visionnage</label>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
               <input type="date" id="retro-date" max="${localDateISO()}" style="padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:rgba(255,255,255,.05); color:var(--text); font-size:13px;" />
               <button class="btn ghost" onclick="app.setRetroDateClick('${media.id}')">Définir cette date</button>
@@ -5284,7 +5311,7 @@ async function renderCollectionPage(collectionId) {
       </div>
     </div>`;
   } catch (err) {
-    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -5316,7 +5343,7 @@ async function renderKeywordPage(keywordId, mediaTypeHint, keywordName) {
       </div>`}
     </div>`;
   } catch (err) {
-    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -5359,7 +5386,7 @@ async function renderPersonPage(personId) {
       </div>` : ''}
     </div>`;
   } catch (err) {
-    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -5588,9 +5615,9 @@ async function renderMyListsTab() {
     </div>`;
     // Re-render after the controls have entered the DOM so the initial sort,
     // quick filters and live result counter are applied consistently.
-    if (document.getElementById('watchlist-grid')) app.refreshWatchlistFilter();
+    if (document.getElementById('watchlist-grid')) window.app.refreshWatchlistFilter();
   } catch (err) {
-    box.innerHTML = `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+    box.innerHTML = `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -5791,7 +5818,7 @@ function renderDiscoveryPage() {
   discoveryMode = 'watchlist';
   discoveryCatalogItems = [];
   discoveryVisibleItems = [];
-  root.innerHTML = chrome() + `<main class="container page discovery-page">
+  root.innerHTML = chrome() + `<section class="container page discovery-page">
     <header class="discovery-page-header"><div class="library-eyebrow">TA PROCHAINE HISTOIRE COMMENCE ICI</div><h1>Que regarder ce soir ?</h1><p>Une sélection personnalisée à partir de ta liste et de tes goûts, avec un explorateur pour élargir les horizons.</p></header>
     <section class="discovery-control-panel panel" aria-label="Personnaliser les recommandations">
       <div class="discovery-section-heading"><div><span class="discovery-overline">01 / TON ÉTAT D'ESPRIT</span><h2>Tu as envie de quoi ?</h2></div><span class="discovery-save-indicator">✓ Préférences mémorisées sur cet appareil</span></div>
@@ -5808,7 +5835,7 @@ function renderDiscoveryPage() {
     <section class="discovery-results-section"><div class="discovery-results-heading"><div><span class="discovery-overline">02 / TA SÉLECTION</span><h2 id="discovery-results-title">Depuis ma liste</h2><p id="discovery-results-subtitle">Les titres sont classés selon ta sélection et les genres que tu as le mieux notés.</p></div><span id="discovery-count" class="discovery-count">Chargement…</span></div><div id="discovery-results"><div class="loading-center"><span class="spinner"></span> Analyse de ta bibliothèque…</div></div>
     <div class="discovery-compare-panel panel"><div class="discovery-section-heading"><div><span class="discovery-overline">03 / FACE À FACE</span><h2>Comparer des titres</h2><p>Choisis jusqu'à trois films ou séries pour comparer leurs informations essentielles.</p></div></div><div id="discovery-compare">${discoveryCompareHtml()}</div></div></section>
     <p class="discovery-footnote">Les suggestions locales utilisent les données déjà enregistrées. L'exploration distante s'appuie sur TMDB ; la disponibilité streaming peut varier selon le pays et l'abonnement.</p>
-  </main>`;
+  </section>`;
   const token = ++discoveryLoadToken;
   (async () => {
     try {
@@ -6180,7 +6207,7 @@ async function renderCustomListsStudio() {
         ? `<p style="color:var(--muted); font-size:14px;">Aucune liste pour l'instant.</p>`
         : sorted.map((l, idx) => customListPanelHtml(l, idx, sorted.length)).join('')}`;
   } catch (err) {
-    container.innerHTML = `<p class="error-text">Erreur : ${err.message}</p>`;
+    container.innerHTML = `<p class="error-text">Erreur : ${escapeHtml(err.message)}</p>`;
   }
 }
 
@@ -6641,7 +6668,7 @@ async function renderFranchiseDetail(key) {
     currentFranchiseInteractions = interactionsMap;
     renderFranchiseDetailContent();
   } catch (err) {
-    box.innerHTML = `<div class="container" style="padding:16px 16px 100px;"><p class="error-text">${err.message}</p></div>`;
+    box.innerHTML = `<div class="container" style="padding:16px 16px 100px;"><p class="error-text">${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -6708,7 +6735,7 @@ async function renderTimelineStudio() {
   if (!container) return;
   if (!watchedItemsCache) {
     try { watchedItemsCache = await getWatchedItemsFull(); }
-    catch (err) { container.innerHTML = `<p class="error-text">${err.message}</p>`; return; }
+    catch (err) { container.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`; return; }
   }
   if (watchedItemsCache.length === 0) {
     container.innerHTML = `<p style="color:var(--muted); font-size:14px;">Marque des films/séries comme "Vus" pour pouvoir construire une frise.</p>`;
@@ -7271,7 +7298,7 @@ async function renderProfilePage() {
     lastEmailDigestEnabled = emailDigestEnabled;
     renderProfileDashboard(stats, goal, lastProfileListsCount);
   } catch (err) {
-    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${err.message}</p></div>`;
+    root.innerHTML = chrome() + `<div class="container page"><p class="error-text">Erreur : ${escapeHtml(err.message)}</p></div>`;
   }
 }
 
@@ -7916,12 +7943,12 @@ async function renderCalendar() {
     ].sort((a,b)=>String(a.date).localeCompare(String(b.date)));
     const activeView = calendarViewState === 'upcoming' ? 'upcoming' : 'activity';
     const viewHtml = activeView === 'activity' ? renderCalendarActivity(activityGroups) : renderCalendarUpcoming(upcoming);
-    root.innerHTML = chrome() + `<main class="container page personal-calendar-page">
+    root.innerHTML = chrome() + `<section class="container page personal-calendar-page">
       <header class="calendar-page-heading"><div class="library-eyebrow">TON TEMPS, TON HISTORIQUE</div><h1>Calendrier cinématographique</h1><p>Retrouve tes visionnages et garde un œil sur les prochaines sorties.</p></header>
       <div class="calendar-view-switch" role="tablist" aria-label="Vue du calendrier"><button role="tab" aria-selected="${activeView==='activity'}" class="${activeView==='activity'?'active':''}" onclick="app.setCalendarView('activity')">◷ Mon activité</button><button role="tab" aria-selected="${activeView==='upcoming'}" class="${activeView==='upcoming'?'active':''}" onclick="app.setCalendarView('upcoming')">✦ Sorties & épisodes <span>${upcoming.length}</span></button></div>
       ${viewHtml}
       <div class="calendar-page-footer"><span>Mis à jour à partir de ton historique MatthiasTrack.</span><button type="button" class="btn ghost" onclick="app.refreshCalendar()">↻ Actualiser les données</button></div>
-    </main>`;
+    </section>`;
   } catch (err) {
     root.innerHTML = chrome() + `<div class="container page"><div class="smart-empty"><span>!</span><h2>Le calendrier n'a pas pu se charger</h2><p>${escapeHtml(err?.message || 'Une erreur est survenue.')}</p><button class="btn blue" onclick="app.refreshCalendar()">Réessayer</button></div></div>`;
   }
@@ -8493,7 +8520,7 @@ window.app = {
       if (error) { errBox.textContent = error; return; }
       customListsCache = null;
       await refreshCurrentUser();
-      navigate('#/');
+      navigate(consumeAfterLoginHash());
     } catch (err) {
       errBox.textContent = `Connexion impossible : ${err?.message || 'erreur inattendue'}`;
     }
@@ -8628,7 +8655,7 @@ window.app = {
       currentSeasonNumber = seasonNumber;
       renderCurrentSeasonEpisodesList();
     } catch (err) {
-      box.innerHTML = `<p class="error-text">${err.message}</p>`;
+      box.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
     }
   },
   async markSeasonWatched(btnEl) {
@@ -9041,6 +9068,8 @@ window.app = {
     } catch (err) { showErrorToast(err.message); }
   },
   async banClick(mediaId) {
+    if (!currentUser) { redirectToLogin(); showErrorToast('Connecte-toi pour gérer ta liste noire.'); return; }
+    if (!window.confirm('Bannir ce titre ?\n\nIl n’apparaîtra plus dans tes suggestions. Tu pourras le retirer de la liste noire depuis cette fiche.')) return;
     try { await toggleBlacklist(mediaId); watchedItemsCache = null; render(); } catch (err) { showErrorToast(err.message); }
   },
   async unbanClick(mediaId) {
@@ -9339,6 +9368,14 @@ window.app = {
    MATTHIASTRACK 21.0 — SMALL, LOCAL UX HELPERS
    No backend changes: keyboard/focus ergonomics and one-tap return-to-top.
    ======================================================================== */
+// Service worker : permet d'ouvrir l'app sans réseau (voir sw.js). Ignoré en
+// file:// et sur les navigateurs qui ne le supportent pas.
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker non enregistré :', err));
+  });
+}
+
 (() => {
   const body = document.body;
   const html = document.documentElement;
